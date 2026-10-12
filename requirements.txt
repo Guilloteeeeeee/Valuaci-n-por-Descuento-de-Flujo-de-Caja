@@ -1,2 +1,4 @@
-streamlit
-yahooquery
+streamlit>=1.32.0
+yahooquery>=2.3.7
+pandas>=2.0.0
+numpy>=1.24.0
