@@ -437,6 +437,34 @@ if run:
                     matrix.append(row)
                 st.dataframe(pd.DataFrame(matrix), use_container_width=True, hide_index=True)
 
+                # Sensibilidad aislada del CapEx/CFO: mantiene fijos crecimiento, Ke y g.
+                st.subheader("Prueba aislada: sensibilidad al CapEx/CFO de largo plazo")
+                st.caption(
+                    "Esta tabla modifica únicamente el CapEx/CFO de largo plazo. "
+                    "Mantiene fijos el crecimiento CFO del escenario base, Ke, g, el ratio del último año, "
+                    "el horizonte y el margen de seguridad. No está calibrada a proveedores externos."
+                )
+                capex_grid = sorted(set([float(x) / 100 for x in range(50, 101, 5)] + [long_run_capex_ratio]))
+                capex_rows = []
+                for ratio_test in capex_grid:
+                    sens_capex = project_dcf(
+                        cfo_m, latest_ratio, ratio_test, growth_base, cost_equity,
+                        terminal_growth, shares_m, forecast_years, margin_of_safety
+                    )
+                    capex_rows.append({
+                        "CapEx/CFO largo plazo": f"{ratio_test:.1%}",
+                        "Valor intrínseco/acción": fmt_money(sens_capex["intrinsic_value"]) if sens_capex else "N/V",
+                        "Precio con margen": fmt_money(sens_capex["entry_price"]) if sens_capex else "N/V",
+                        "Valor terminal (% total)": f"{sens_capex['terminal_share']:.1%}" if sens_capex else "N/V",
+                        "Escenario base actual": "← base" if abs(ratio_test - long_run_capex_ratio) < 0.0005 else "",
+                    })
+                st.dataframe(pd.DataFrame(capex_rows), use_container_width=True, hide_index=True)
+                st.info(
+                    "Lectura: si el valor cambia mucho entre ratios cercanos, el DCF depende fuertemente "
+                    "de la hipótesis de inversión. Un ratio más bajo no es automáticamente más correcto: "
+                    "debe justificarse con una tesis sobre la intensidad de capital futura de la empresa."
+                )
+
                 with st.expander("🔎 Proyección anual detallada — escenario base", expanded=False):
                     table = pd.DataFrame(base["rows"])
                     table["Crecimiento CFO"] = table["Crecimiento CFO"].map(lambda x: f"{x:.2%}")
