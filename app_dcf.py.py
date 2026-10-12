@@ -5,22 +5,11 @@ import pandas as pd
 # Configuración de la página
 st.set_page_config(page_title="Valuación DCF Automática", page_icon="📈", layout="wide")
 
-st.title("📈 Calculadora DCF Automática (Owner Earnings & CapEx Normalizado)")
-st.write("Modelo institucional de 2 etapas con normalización automática de CapEx de Mantenimiento (CFO - D&A) y análisis multi-escenario.")
+st.title("📈 Calculadora Automática DCF (Estilo Simply Wall St)")
+st.write("Modelo institucional de 2 etapas: FCF reportado proyectado al CAGR del Cash Flow Operativo (CFO) en 3 escenarios.")
 
-# --- SIDEBAR: AJUSTES GENERALES OPCIONALES ---
-st.sidebar.header("⚙️ Ajustes Manuales (Opcionales)")
-
-override_cagr = st.sidebar.checkbox("Forzar CAGR manualmente", value=False)
-cagr_manual_val = st.sidebar.slider("CAGR Proyectado (Años 1-5)", 0.0, 40.0, 15.0, 0.5) / 100 if override_cagr else None
-
-override_wacc = st.sidebar.checkbox("Forzar WACC manualmente", value=False)
-wacc_manual_val = st.sidebar.slider("Tasa de Descuento (WACC)", 5.0, 15.0, 8.66, 0.1) / 100 if override_wacc else None
-
-override_g = st.sidebar.slider("Tasa Crecimiento Perpetuo (g)", 2.0, 5.0, 3.7, 0.1) / 100
-
-# Entrada de Ticker
-ticker_simbolo = st.text_input("Escribe el Ticker de la empresa (ej. MSFT, AAPL, META):", "MSFT").upper()
+# Entrada de Ticker (Único parámetro de entrada)
+ticker_simbolo = st.text_input("Escribe el Ticker de la empresa (ej. MSFT, AAPL, META, GOOGL):", "MSFT").upper()
 
 # --- MOTOR MATEMÁTICO DCF ---
 def calcular_dcf_motor(fcf_inicial, cagr, acciones_millones, tasa_descuento, g_perp):
@@ -31,6 +20,7 @@ def calcular_dcf_motor(fcf_inicial, cagr, acciones_millones, tasa_descuento, g_p
     fcf_actual_proyeccion = fcf_inicial
     tabla_proyecciones = []
     
+    # Curva de desaceleración gradual (Fade Rate) a 10 años
     tasa_actual = cagr
     paso_reduccion = (cagr - g_perp) / 10 if cagr > g_perp else 0
     
@@ -47,10 +37,12 @@ def calcular_dcf_motor(fcf_inicial, cagr, acciones_millones, tasa_descuento, g_p
             "FCF Descontado": f"${fcf_descontado:,.2f} M"
         })
         
+    # Valor Terminal (Gordon Growth Model)
     fcf_anio_10 = fcf_actual_proyeccion
     valor_terminal = (fcf_anio_10 * (1 + g_perp)) / (tasa_descuento - g_perp)
     valor_terminal_descontado = valor_terminal / ((1 + tasa_descuento) ** 10)
     
+    # Valor Total y por Acción
     valor_total_empresa = fcf_descontado_total + valor_terminal_descontado
     valor_por_accion = valor_total_empresa / acciones_millones
     valor_seguridad = valor_por_accion * 0.79 
@@ -60,7 +52,7 @@ def calcular_dcf_motor(fcf_inicial, cagr, acciones_millones, tasa_descuento, g_p
 # --- BOTÓN DE EJECUCIÓN ---
 if st.button("Ejecutar Valuación Automática"):
     
-    with st.spinner(f"Procesando balance, normalizando CapEx y calculando escenarios para {ticker_simbolo}..."):
+    with st.spinner(f"Extrayendo datos financieros y calculando escenarios para {ticker_simbolo}..."):
         try:
             empresa = Ticker(ticker_simbolo)
             
@@ -81,7 +73,7 @@ if st.button("Ejecutar Valuación Automática"):
             except:
                 precio = 0
 
-            # 2. BETA
+            # 2. BETA DE MERCADO
             beta_mercado = 1.0
             try:
                 summary_data = empresa.summary_detail.get(ticker_simbolo, {})
@@ -111,95 +103,73 @@ if st.button("Ejecutar Valuación Automática"):
                     
             acciones_millones = acciones / 1000000 if acciones else 0
             
-            # 4. NORMALIZACIÓN AUTOMÁTICA DE CAJA (OWNER EARNINGS)
+            # 4. FCF INFORMADO Y CAGR DEL CFO (HISTÓRICO)
             cf = empresa.cash_flow()
             
-            cfo_actual = 0.0
-            da_actual = 0.0
-            fcf_bruto_actual = 0.0
+            fcf_actual = 0.0
             cagr_cfo_auto = 0.10
             
             if hasattr(cf, 'columns'):
-                # Extraer CFO
-                if 'OperatingCashFlow' in cf.columns:
-                    lista_cfo = cf['OperatingCashFlow'].dropna().tolist()
-                    if len(lista_cfo) > 0:
-                        cfo_actual = lista_cfo[-1] / 1000000
-                    if len(lista_cfo) >= 2:
-                        cfo_hist = lista_cfo[0] / 1000000
-                        p_cfo = len(lista_cfo) - 1
-                        if cfo_hist > 0 and cfo_actual > 0:
-                            cagr_cfo_auto = (cfo_actual / cfo_hist) ** (1 / p_cfo) - 1
-
-                # Extraer D&A (Depreciación y Amortización como proxy de CapEx de Mantenimiento)
-                for col_da in ['DepreciationAndAmortization', 'DepreciationAmortizationDepletion', 'ReconciledDepreciation']:
-                    if col_da in cf.columns:
-                        lista_da = cf[col_da].dropna().tolist()
-                        if len(lista_da) > 0:
-                            da_actual = lista_da[-1] / 1000000
-                            break
-                            
-                # Extraer FCF estándar de respaldo
+                # FCF Informado (Base Oficial)
                 if 'FreeCashFlow' in cf.columns:
                     lista_fcf = cf['FreeCashFlow'].dropna().tolist()
                     if len(lista_fcf) > 0:
-                        fcf_bruto_actual = lista_fcf[-1] / 1000000
+                        fcf_actual = lista_fcf[-1] / 1000000
 
-            # Determinación automática del FCF Normalizado (CFO - D&A)
-            if cfo_actual > 0 and da_actual > 0:
-                fcf_base_normalizado = cfo_actual - da_actual
-                metodo_usado = "Owner Earnings (CFO - D&A)"
-            elif fcf_bruto_actual > 0:
-                fcf_base_normalizado = fcf_bruto_actual
-                metodo_usado = "FCF Tradicional (Reportado)"
-            else:
-                fcf_base_normalizado = 0.0
-                metodo_usado = "N/D"
+                # CAGR derivado del Cash Flow Operativo (CFO)
+                if 'OperatingCashFlow' in cf.columns:
+                    lista_cfo = cf['OperatingCashFlow'].dropna().tolist()
+                    if len(lista_cfo) >= 2:
+                        cfo_act = lista_cfo[-1] / 1000000
+                        cfo_hist = lista_cfo[0] / 1000000
+                        p_cfo = len(lista_cfo) - 1
+                        if cfo_hist > 0 and cfo_act > 0:
+                            cagr_cfo_auto = (cfo_act / cfo_hist) ** (1 / p_cfo) - 1
 
-            # Selección automática de CAGR (con límites lógicos)
-            cagr_base = cagr_manual_val if override_cagr else cagr_cfo_auto
-            if not override_cagr:
-                if cagr_base > 0.30: cagr_base = 0.30
-                elif cagr_base < 0.04: cagr_base = 0.04
+            # Acotar el CAGR dentro de rangos lógicos institucionales
+            cagr_base = max(0.04, min(cagr_cfo_auto, 0.30))
             
-            # WACC Base (CAPM)
-            risk_free_rate = 0.037
-            equity_risk_premium = 0.0442
+            # PARÁMETROS MACRO FIJOS (SIMPLY WALL ST)
+            risk_free_rate = 0.037       # 3.70% (Bono del tesoro)
+            equity_risk_premium = 0.0442 # 4.42% (S&P Global ERP)
+            g_base = 0.037               # 3.70% Crecimiento Perpetuo Estándar
+            
+            # WACC Dinámico vía CAPM
             beta_ajustado = max(0.8, min(beta_mercado, 2.0))
-            wacc_base = wacc_manual_val if override_wacc else (risk_free_rate + (beta_ajustado * equity_risk_premium))
+            wacc_base = risk_free_rate + (beta_ajustado * equity_risk_premium)
             
             # --- DASHBOARD VISUAL DE DATOS EXTRAÍDOS ---
-            st.success(f"✅ ¡Datos procesados automáticamente usando **{metodo_usado}**!")
+            st.success("✅ ¡Datos financieros procesados automáticamente!")
             
-            st.markdown("### 📊 Datos Base de Mercado Normalizados")
+            st.markdown("### 📊 Datos Base de Mercado")
             col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Precio Mercado", f"${precio:.2f}" if precio > 0 else "N/D")
             col2.metric("Acciones Circ.", f"{acciones_millones:,.0f} M")
-            col3.metric("Caja Base Normalizada", f"${fcf_base_normalizado:,.2f} M", help=f"CFO: ${cfo_actual:,.2f}M | D&A: ${da_actual:,.2f}M")
-            col4.metric("CAGR CFO Auto", f"{cagr_base*100:.2f}%")
-            col5.metric("WACC Base", f"{wacc_base*100:.2f}%")
+            col3.metric("FCF Informado Base", f"${fcf_actual:,.2f} M")
+            col4.metric("CAGR (CFO Auto)", f"{cagr_base*100:.2f}%")
+            col5.metric("WACC Base (CAPM)", f"{wacc_base*100:.2f}%")
             
             st.divider()
             
-            if fcf_base_normalizado <= 0 or acciones_millones <= 0 or precio <= 0:
-                st.warning("⚠️ No se pudieron validar los datos fundamentales o la caja operativa es negativa.")
+            if fcf_actual <= 0 or acciones_millones <= 0 or precio <= 0:
+                st.warning("⚠️ No se pudieron validar los datos fundamentales o el Free Cash Flow es negativo.")
             else:
                 # --- CÁLCULO DE LOS 3 ESCENARIOS ---
                 
                 # 🔴 1. Escenario Pesimista
                 cagr_pes = max(0.02, cagr_base * 0.80)
                 wacc_pes = wacc_base + 0.0075
-                g_pes = max(0.02, override_g - 0.007)
-                vi_pes, margin_pes, tab_pes = calcular_dcf_motor(fcf_base_normalizado, cagr_pes, acciones_millones, wacc_pes, g_pes)
+                g_pes = max(0.02, g_base - 0.007)
+                vi_pes, margin_pes, tab_pes = calcular_dcf_motor(fcf_actual, cagr_pes, acciones_millones, wacc_pes, g_pes)
                 
                 # 🟡 2. Escenario Base
-                vi_base, margin_base, tab_base = calcular_dcf_motor(fcf_base_normalizado, cagr_base, acciones_millones, wacc_base, override_g)
+                vi_base, margin_base, tab_base = calcular_dcf_motor(fcf_actual, cagr_base, acciones_millones, wacc_base, g_base)
                 
                 # 🟢 3. Escenario Optimista
                 cagr_opt = min(0.40, cagr_base * 1.20)
                 wacc_opt = max(0.05, wacc_base - 0.005)
-                g_opt = override_g + 0.005
-                vi_opt, margin_opt, tab_opt = calcular_dcf_motor(fcf_base_normalizado, cagr_opt, acciones_millones, wacc_opt, g_opt)
+                g_opt = g_base + 0.005
+                vi_opt, margin_opt, tab_opt = calcular_dcf_motor(fcf_actual, cagr_opt, acciones_millones, wacc_opt, g_opt)
                 
                 st.markdown("### 🎯 Comparativa de Valor Intrínseco por Escenarios")
                 
@@ -208,28 +178,4 @@ if st.button("Ejecutar Valuación Automática"):
                 with col_pes:
                     diff_pes = ((vi_pes - precio) / precio) * 100
                     st.error("🔴 **Escenario Pesimista**")
-                    st.metric("Valor Justo", f"${vi_pes:.2f}", delta=f"{diff_pes:.1f}% vs Mercado")
-                    st.metric("Precio c/ Margen (21%)", f"${margin_pes:.2f}")
-                    st.caption(f"CAGR {cagr_pes*100:.2f}% | WACC {wacc_pes*100:.2f}% | g {g_pes*100:.2f}%")
-                    
-                with col_base:
-                    diff_base = ((vi_base - precio) / precio) * 100
-                    st.warning("🟡 **Escenario Base**")
-                    st.metric("Valor Justo", f"${vi_base:.2f}", delta=f"{diff_base:.1f}% vs Mercado")
-                    st.metric("Precio c/ Margen (21%)", f"${margin_base:.2f}")
-                    st.caption(f"CAGR {cagr_base*100:.2f}% | WACC {wacc_base*100:.2f}% | g {override_g*100:.2f}%")
-
-                with col_opt:
-                    diff_opt = ((vi_opt - precio) / precio) * 100
-                    st.success("🟢 **Escenario Optimista**")
-                    st.metric("Valor Justo", f"${vi_opt:.2f}", delta=f"{diff_opt:.1f}% vs Mercado")
-                    st.metric("Precio c/ Margen (21%)", f"${margin_opt:.2f}")
-                    st.caption(f"CAGR {cagr_opt*100:.2f}% | WACC {wacc_opt*100:.2f}% | g {g_opt*100:.2f}%")
-
-                # Auditoría de Flujos
-                st.divider()
-                with st.expander("🔍 Ver detalle de flujos proyectados (Escenario Base)"):
-                    st.table(tab_base)
-
-        except Exception as e:
-            st.error(f"Hubo un error al procesar los datos: {e}")
+                    st.metric("Valor Justo",
