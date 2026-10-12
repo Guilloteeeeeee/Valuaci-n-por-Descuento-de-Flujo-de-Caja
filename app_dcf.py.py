@@ -213,7 +213,3 @@ if st.button("Ejecutar Valuación Multi-Escenario"):
 
         except Exception as e:
             st.error(f"Hubo un error al procesar los datos: {e}")
-                    st.table(tabla_proyeccion)
-
-        except Exception as e:
-            st.error(f"Hubo un error al procesar los datos: {e}")
