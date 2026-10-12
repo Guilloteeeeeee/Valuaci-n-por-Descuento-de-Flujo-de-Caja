@@ -2,36 +2,33 @@ import streamlit as st
 from yahooquery import Ticker
 
 # Diseño de la página
-st.set_page_config(page_title="Valuación DCF Automática - Estilo Institucional", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Valuación DCF Automática - Estilo Simply Wall St", page_icon="📈", layout="wide")
 
-st.title("📈 Calculadora Automática DCF (Modelo Institucional)")
-st.write("Herramienta automatizada para la comunidad financiera. Valuación intrínseca de 2 etapas con desaceleración gradual.")
+st.title("📈 Calculadora Automática DCF (Estilo Simply Wall St)")
+st.write("Herramienta comunitaria con modelo de 2 etapas y parámetros macroeconómicos automáticos.")
 
 # Cuadro para que el usuario escriba el Ticker
-ticker_simbolo = st.text_input("Escribe el Ticker de la empresa (ej. AAPL, MSFT, META):", "MSFT").upper()
+ticker_simbolo = st.text_input("Escribe el Ticker de la empresa (ej. MSFT, AAPL, META):", "MSFT").upper()
 
-# --- MOTOR MATEMÁTICO INSTITUCIONAL (Automático con Desaceleración) ---
-def calcular_dcf_institucional(fcf_inicial, cagr_inicial, acciones_millones):
+# --- MOTOR MATEMÁTICO ESTILO SIMPLY WALL ST ---
+def calcular_dcf_simply(fcf_inicial, cagr_inicial, acciones_millones):
     if acciones_millones <= 0 or fcf_inicial <= 0: 
         return 0, 0, []
     
-    # Parámetros macro automáticos estilo Simply Wall St para empresas grandes
-    tasa_descuento = 0.087  # ~8.7% (Costo de capital promedio ajustado)
-    g_perp = 0.035          # ~3.5% (Crecimiento perpetuo de largo plazo)
+    # Parámetros exactos extraídos del reporte de referencia para grandes techs
+    tasa_descuento = 0.0866  # 8.66% Cost of Equity
+    g_perp = 0.037           # 3.70% Perpetual Growth Rate (Bono a 5 años)
     
     fcf_descontado_total = 0
     fcf_actual_proyeccion = fcf_inicial
     tabla_proyecciones = []
     
-    # Curva de desaceleración gradual (Fade Growth Rate) a lo largo de 10 años
-    # El crecimiento inicial va cediendo año a año hasta converger con la perpetuidad
+    # Curva de desaceleración gradual (Fade Rate) a 10 años
     tasa_actual = cagr_inicial
     paso_reduccion = (cagr_inicial - g_perp) / 10 if cagr_inicial > g_perp else 0
     
     for i in range(1, 11):
-        # Reducir gradualmente la tasa de crecimiento hacia la perpetuidad
         tasa_actual = max(tasa_actual - paso_reduccion, g_perp)
-        
         fcf_actual_proyeccion = fcf_actual_proyeccion * (1 + tasa_actual)
         fcf_descontado = fcf_actual_proyeccion / ((1 + tasa_descuento) ** i)
         fcf_descontado_total += fcf_descontado
@@ -43,14 +40,12 @@ def calcular_dcf_institucional(fcf_inicial, cagr_inicial, acciones_millones):
             "FCF Descontado": f"${fcf_descontado:,.2f} M"
         })
         
-    # FCF del último año para Valor Terminal
-    fcf_anio_10 = fcf_actual_proyeccion
-    
     # Valor Terminal (Gordon Growth Model)
+    fcf_anio_10 = fcf_actual_proyeccion
     valor_terminal = (fcf_anio_10 * (1 + g_perp)) / (tasa_descuento - g_perp)
     valor_terminal_descontado = valor_terminal / ((1 + tasa_descuento) ** 10)
     
-    # Valor Total de la Empresa y por Acción
+    # Valor Total y por Acción
     valor_total_empresa = fcf_descontado_total + valor_terminal_descontado
     valor_por_accion = valor_total_empresa / acciones_millones
     
@@ -60,17 +55,32 @@ def calcular_dcf_institucional(fcf_inicial, cagr_inicial, acciones_millones):
     return valor_por_accion, valor_seguridad, tabla_proyecciones
 
 # Botón para accionar la ejecución
-if st.button("Ejecutar Valuación Automática"):
+if st.button("Ejecutar Valuación"):
     
-    with st.spinner(f"Extrayendo estados financieros y aplicando modelo de 2 etapas para {ticker_simbolo}..."):
+    with st.spinner(f"Extrayendo datos de mercado y calculando modelo para {ticker_simbolo}..."):
         try:
             empresa = Ticker(ticker_simbolo)
             
-            # 1. Obtener Precio Actual
-            precio_data = empresa.price.get(ticker_simbolo, {})
-            precio = precio_data.get('regularMarketPrice', 0) if isinstance(precio_data, dict) else 0
-            
-            # 2. Obtener Acciones Dinámicas
+            # 1. BÚSQUEDA ROBUSTA DE PRECIO (Evita el error de $0.00)
+            precio = 0
+            try:
+                price_data = empresa.price.get(ticker_simbolo, {})
+                if isinstance(price_data, dict):
+                    precio = price_data.get('regularMarketPrice', 0)
+                    if not precio or precio == 0:
+                        precio = price_data.get('currentPrice', 0)
+            except:
+                pass
+                
+            if not precio or precio == 0:
+                try:
+                    summary = empresa.summary_detail.get(ticker_simbolo, {})
+                    if isinstance(summary, dict):
+                        precio = summary.get('previousClose', 0)
+                except:
+                    pass
+
+            # 2. Obtener Acciones Dinámicas (Estrategia de 3 pasos)
             datos_stats = empresa.key_stats.get(ticker_simbolo, {})
             acciones = 0
             if isinstance(datos_stats, dict):
@@ -88,7 +98,7 @@ if st.button("Ejecutar Valuación Automática"):
                     
             acciones_millones = acciones / 1000000 if acciones else 0
             
-            # 3. Obtener Free Cash Flow y CAGR Automático
+            # 3. Obtener Free Cash Flow y CAGR
             cf = empresa.cash_flow()
             lista_fcf = []
             if hasattr(cf, 'columns') and 'FreeCashFlow' in cf.columns:
@@ -102,20 +112,20 @@ if st.button("Ejecutar Valuación Automática"):
                 if fcf_historico > 0 and fcf_actual > 0:
                     cagr_automatico = (fcf_actual / fcf_historico) ** (1 / periodos) - 1
                 else:
-                    cagr_automatico = 0.08
+                    cagr_automatico = 0.10
             elif len(lista_fcf) == 1:
                 fcf_actual = lista_fcf[0] / 1000000
-                cagr_automatico = 0.08
+                cagr_automatico = 0.10
             else:
                 fcf_actual = 0.0
-                cagr_automatico = 0.08
+                cagr_automatico = 0.10
             
-            # Acotar el CAGR para que sea realista y automático
-            if cagr_automatico > 0.25: cagr_automatico = 0.25
+            # Límites de seguridad lógicos
+            if cagr_automatico > 0.30: cagr_automatico = 0.30
             elif cagr_automatico < 0.04: cagr_automatico = 0.04
             
             # --- DASHBOARD VISUAL ---
-            st.success("✅ ¡Valuación institucional calculada con éxito!")
+            st.success("✅ ¡Datos procesados correctamente!")
             
             st.markdown("### 📊 Datos Base Extraídos")
             col1, col2, col3, col4 = st.columns(4)
@@ -130,9 +140,11 @@ if st.button("Ejecutar Valuación Automática"):
                 st.warning("⚠️ Esta empresa presenta Free Cash Flow negativo o no disponible.")
             elif acciones_millones <= 0:
                 st.warning("⚠️ No se pudo determinar el número de acciones en circulación.")
+            elif precio <= 0:
+                st.warning("⚠️ No se pudo extraer el precio actual de mercado. Intenta nuevamente.")
             else:
-                # Ejecutamos el modelo automático
-                valor_justo, precio_compra, tabla_proyeccion = calcular_dcf_institucional(fcf_actual, cagr_automatico, acciones_millones)
+                # Ejecutamos el modelo
+                valor_justo, precio_compra, tabla_proyeccion = calcular_dcf_simply(fcf_actual, cagr_automatico, acciones_millones)
                 
                 # Diferencia porcentual con el precio de mercado
                 diff_pct = ((valor_justo - precio) / precio) * 100
@@ -145,12 +157,12 @@ if st.button("Ejecutar Valuación Automática"):
                 res3.metric("Precio Actual en Pantalla", f"${precio:.2f}")
                 
                 if valor_justo > precio:
-                    st.success("🟢 **Evaluación:** Según el modelo de flujos descontados, la acción se encuentra **infravalorada** frente al precio de mercado.")
+                    st.success("🟢 **Evaluación:** Según el modelo, la acción se encuentra **infravalorada** frente al mercado.")
                 else:
-                    st.warning("🟡 **Evaluación:** Según el modelo de flujos descontados, la acción cotiza por encima de su valor intrínseco estimado.")
+                    st.warning("🟡 **Evaluación:** Según el modelo, la acción se encuentra cotizando por encima de su valor intrínseco.")
 
-                # Tabla de auditoría de los 10 años
-                with st.expander("🔍 Ver auditoría completa de flujos proyectados a 10 años (Modelo de Desaceleración)"):
+                # Tabla de auditoría
+                with st.expander("🔍 Ver auditoría completa de flujos proyectados a 10 años"):
                     st.table(tabla_proyeccion)
 
         except Exception as e:
