@@ -178,4 +178,28 @@ if st.button("Ejecutar Valuación Automática"):
                 with col_pes:
                     diff_pes = ((vi_pes - precio) / precio) * 100
                     st.error("🔴 **Escenario Pesimista**")
-                    st.metric("Valor Justo",
+                    st.metric("Valor Justo", f"${vi_pes:.2f}", delta=f"{diff_pes:.1f}% vs Mercado")
+                    st.metric("Precio c/ Margen (21%)", f"${margin_pes:.2f}")
+                    st.caption(f"CAGR {cagr_pes*100:.2f}% | WACC {wacc_pes*100:.2f}% | g {g_pes*100:.2f}%")
+                    
+                with col_base:
+                    diff_base = ((vi_base - precio) / precio) * 100
+                    st.warning("🟡 **Escenario Base**")
+                    st.metric("Valor Justo", f"${vi_base:.2f}", delta=f"{diff_base:.1f}% vs Mercado")
+                    st.metric("Precio c/ Margen (21%)", f"${margin_base:.2f}")
+                    st.caption(f"CAGR {cagr_base*100:.2f}% | WACC {wacc_base*100:.2f}% | g {g_base*100:.2f}%")
+
+                with col_opt:
+                    diff_opt = ((vi_opt - precio) / precio) * 100
+                    st.success("🟢 **Escenario Optimista**")
+                    st.metric("Valor Justo", f"${vi_opt:.2f}", delta=f"{diff_opt:.1f}% vs Mercado")
+                    st.metric("Precio c/ Margen (21%)", f"${margin_opt:.2f}")
+                    st.caption(f"CAGR {cagr_opt*100:.2f}% | WACC {wacc_opt*100:.2f}% | g {g_opt*100:.2f}%")
+
+                # Auditoría de Flujos
+                st.divider()
+                with st.expander("🔍 Ver detalle de flujos proyectados (Escenario Base)"):
+                    st.table(tab_base)
+
+        except Exception as e:
+            st.error(f"Hubo un error al procesar los datos: {e}")
