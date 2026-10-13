@@ -30,6 +30,8 @@ def _stretch():
 
 STRETCH = _stretch()
 
+APP_VERSION = "v2.5 · 13/10/2026"
+
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
 MODEL_LABELS = {"FCFF": "Empresa común (todos los demás sectores)",
@@ -94,50 +96,57 @@ def build_excel(co, res, base, sens, p, model, mos):
 # ----------------------------------------------------------------------------
 # Barra lateral: supuestos globales
 # ----------------------------------------------------------------------------
+def K(name):
+    """Clave de widget que cambia con cada ticker nuevo => los valores se reinician."""
+    return f"{name}_{st.session_state.get('rn', 0)}"
+
+
 with st.sidebar:
     st.header("Supuestos")
-    horizon = st.slider("Horizonte explícito (años)", 5, 15, 10)
-    g_term = st.number_input("Crecimiento terminal g (%)", 0.0, 4.0, 2.5, 0.25) / 100
-    erp = st.number_input("Prima de riesgo de mercado (%)", 3.0, 8.0, 4.5, 0.25) / 100
-    crp_auto = st.checkbox("Prima de riesgo país automática", value=True,
+    horizon = st.slider("Horizonte explícito (años)", 5, 15, 10, key=K("horizon"))
+    g_term = st.number_input("Crecimiento terminal g (%)", 0.0, 4.0, 2.5, 0.25, key=K("gterm")) / 100
+    erp = st.number_input("Prima de riesgo de mercado (%)", 3.0, 8.0, 4.5, 0.25, key=K("erp")) / 100
+    crp_auto = st.checkbox("Prima de riesgo país automática", value=True, key=K("crpauto"),
                            help="Según el país de la empresa, con la tabla de Damodaran (enero 2026). "
                                 "EE.UU., Europa desarrollada y Japón dan casi 0; emergentes suman varios puntos.")
     crp_manual = 0.0
     if not crp_auto:
-        crp_manual = st.number_input("Prima de riesgo país (%)", 0.0, 30.0, 0.0, 0.25) / 100
-    moat = st.select_slider("Ventaja competitiva (moat)", list(MOAT_SPREADS), value="Estrecho",
+        crp_manual = st.number_input("Prima de riesgo país (%)", 0.0, 30.0, 0.0, 0.25, key=K("crpman")) / 100
+    moat = st.select_slider("Ventaja competitiva (moat)", list(MOAT_SPREADS), value="Estrecho", key=K("moat"),
                             help="Cuánto por encima del WACC puede seguir ganando la empresa sobre el capital "
                                  "que reinvierte, para siempre. Ninguno = 0 pp · Estrecho = +2 pp · Amplio = +5 pp. "
                                  "Es el supuesto que más mueve el valor; usalo con criterio (Dorsey).")
-    mos = st.slider("Margen de seguridad deseado (%)", 0, 50, 20) / 100
-    allow_annual = st.checkbox("Permitir último año fiscal si no hay TTM", value=False,
+    mos = st.slider("Margen de seguridad deseado (%)", 0, 50, 20, key=K("mos")) / 100
+    allow_annual = st.checkbox("Permitir último año fiscal si no hay TTM", value=False, key=K("annual"),
                                help="Por defecto se exigen datos de los últimos 12 meses (TTM).")
-    adr_ratio = st.number_input("Acciones ordinarias por ADR (0 = automático)", 0.0, 1000.0, 0.0, 1.0,
-                                help="Solo para ADRs cuando Yahoo no informa la capitalización. "
-                                     "Ej.: TSM = 5, ASML y NVO = 1, BABA = 8.")
+    adr_ratio = st.number_input("Acciones ordinarias por ADR (0 = no es ADR / automático)", 0.0, 1000.0, 0.0, 1.0, key=K("adr"),
+                                help="SOLO para ADRs de empresas extranjeras. Dejalo en 0 para empresas de EE.UU. "
+                                     "(KO, JPM, V, O…). Ej.: TSM = 5, ITUB = 1, BABA = 8. Se ignora si la empresa "
+                                     "reporta en dólares.")
     with st.expander("Ajustes avanzados"):
-        margin_mode = st.selectbox("Margen operativo objetivo", ["median", "ttm", "manual"],
+        margin_mode = st.selectbox("Margen operativo objetivo", ["median", "ttm", "manual"], key=K("mmode"),
                                    format_func={"median": "Mediana histórica (3-4 años + TTM)",
                                                 "ttm": "Mantener TTM", "manual": "Manual"}.get)
         margin_manual = None
         if margin_mode == "manual":
-            margin_manual = st.number_input("Margen EBIT objetivo (%)", -20.0, 80.0, 15.0, 0.5) / 100
-        margin_years = st.slider("Años para converger al margen objetivo", 1, 10, 5)
-        use_g = st.checkbox("Fijar crecimiento de ingresos años 1 y 2")
+            margin_manual = st.number_input("Margen EBIT objetivo (%)", -20.0, 80.0, 15.0, 0.5, key=K("mman")) / 100
+        margin_years = st.slider("Años para converger al margen objetivo", 1, 10, 5, key=K("myears"))
+        use_g = st.checkbox("Fijar crecimiento de ingresos años 1 y 2", key=K("usg"))
         growth_override = None
         if use_g:
-            g1 = st.number_input("Crecimiento año 1 (%)", -20.0, 50.0, 8.0, 0.5) / 100
-            g2 = st.number_input("Crecimiento año 2 (%)", -20.0, 50.0, 6.0, 0.5) / 100
+            g1 = st.number_input("Crecimiento año 1 (%)", -20.0, 50.0, 8.0, 0.5, key=K("g1")) / 100
+            g2 = st.number_input("Crecimiento año 2 (%)", -20.0, 50.0, 6.0, 0.5, key=K("g2")) / 100
             growth_override = (g1, g2)
-        beta_manual = st.number_input("Beta — 0 = la de Yahoo", 0.0, 3.0, 0.0, 0.05)
-        wacc_manual = st.number_input("WACC fijo (%) — 0 = calculado", 0.0, 20.0, 0.0, 0.25) / 100
-        persistence = st.slider("Persistencia del exceso de ROE (financieras)", 0.0, 1.0, 0.5, 0.05,
+        beta_manual = st.number_input("Beta — 0 = la de Yahoo", 0.0, 3.0, 0.0, 0.05, key=K("beta"))
+        wacc_manual = st.number_input("WACC fijo (%) — 0 = calculado", 0.0, 20.0, 0.0, 0.25, key=K("wacc")) / 100
+        persistence = st.slider("Persistencia del exceso de ROE (financieras)", 0.0, 1.0, 0.5, 0.05, key=K("pers"),
                                 help="Qué fracción del ROE por encima de Ke sobrevive en el largo plazo.")
-        affo_ratio = st.slider("AFFO / FFO estimado (REITs)", 0.6, 1.0, 0.90, 0.01)
-        affo_ps = st.number_input("AFFO por acción reportado — 0 = estimar", 0.0, 1000.0, 0.0, 0.05)
-        lease_opt = st.selectbox("Arrendamientos como deuda", ["auto", "sí", "no"],
+        affo_ratio = st.slider("AFFO / FFO estimado (REITs)", 0.6, 1.0, 0.90, 0.01, key=K("affor"))
+        affo_ps = st.number_input("AFFO por acción reportado — 0 = estimar", 0.0, 1000.0, 0.0, 0.05, key=K("affops"))
+        lease_opt = st.selectbox("Arrendamientos como deuda", ["auto", "sí", "no"], key=K("lease"),
                                  help="Auto: EE.UU. = no (el gasto de alquiler ya está en el EBIT); resto = sí.")
 
+st.sidebar.caption(f"Versión de la app: {APP_VERSION}")
 st.title("📈 DCF v2 — Valuación por escenarios")
 st.caption("Ingresá un ticker de Yahoo Finance (ej.: AAPL, KO, JPM, O, TSM, SAP.DE, 7203.T, NESN.SW, ITUB). "
            "Resultado: valor por acción en tres escenarios. Herramienta educativa, no es una recomendación.")
@@ -148,7 +157,7 @@ with st.form("f"):
     rf_in = c3.number_input("Tasa libre de riesgo 10 años (%)", 0.0, 15.0, 0.0, 0.05,
                             help="Opcional. Si la dejás en 0, la app la busca sola (Yahoo / Reserva Federal). "
                                  "Si la cargás, se usa esta.")
-    model_choice = c2.selectbox("Modelo", ["auto", "FCFF", "ER", "REIT"],
+    model_choice = c2.selectbox("Modelo", ["auto", "FCFF", "ER", "REIT"], key=K("model"),
                                 format_func=lambda k: "Automático (detecta el sector)" if k == "auto" else MODEL_LABELS[k],
                                 help="Dejalo en Automático: la app detecta el sector y elige el modelo. "
                                      "Cambialo solo si el aviso te dice que no pudo detectarlo.")
@@ -160,6 +169,11 @@ st.caption("📌 Tasa libre de riesgo = rendimiento del bono del Tesoro de EE.UU
            "Cargala arriba en % (ej.: 4,35) o dejá 0 para que la app la busque sola.")
 
 if go and ticker:
+    if ticker != st.session_state.get("last", ""):
+        # Ticker nuevo: la barra lateral y el modelo vuelven a sus valores por defecto
+        st.session_state["rn"] = st.session_state.get("rn", 0) + 1
+        st.session_state["last"] = ticker
+        st.rerun()
     st.session_state["last"] = ticker
 sym = st.session_state.get("last", "")
 if not sym:
@@ -207,6 +221,13 @@ elif model != auto_model:
 
 res = run_scenarios(co, p, model)
 base = res["Base"]
+if (model_choice == "auto" and model == "FCFF" and not base.ok and "EBIT" in base.error
+        and (co.ni_ttm or 0) > 0 and (co.equity or 0) > 0):
+    model = "ER"
+    why = ("Sin resultado operativo pero con ganancias y patrimonio (típico de bancos y aseguradoras): "
+           "se pasó automáticamente a retorno excedente. Confirmalo si no es una financiera.")
+    res = run_scenarios(co, p, model)
+    base = res["Base"]
 
 all_warns = list(dict.fromkeys(load_warns + data_checks(co)))
 if model == "FCFF" and (co.sector or "") in ("Energy", "Basic Materials"):
