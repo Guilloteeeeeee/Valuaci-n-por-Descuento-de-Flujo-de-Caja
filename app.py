@@ -5,11 +5,15 @@ Modelos:  FCFF desde ingresos (no financieras) · Retorno excedente (bancos, seg
 Ejecutar:  streamlit run app.py
 """
 
+import io
+from datetime import datetime
+
 import altair as alt
 import pandas as pd
 import streamlit as st
 
 import data_yahoo
+from country_risk import country_crp
 from dcf_models import (MOAT_SPREADS, Params, data_checks, route_model, run_scenarios,
                         sensitivity)
 
@@ -28,15 +32,16 @@ STRETCH = _stretch()
 
 st.set_page_config(page_title="DCF v2 · Valuación por escenarios", page_icon="📈", layout="wide")
 
-MODEL_LABELS = {"FCFF": "FCFF (flujo libre a la firma)", "ER": "Retorno excedente (financieras)",
-                "REIT": "AFFO (REITs)"}
+MODEL_LABELS = {"FCFF": "Empresa común (todos los demás sectores)",
+                "ER": "Banco / aseguradora / financiera",
+                "REIT": "REIT (inmobiliaria que cobra alquileres)"}
 SCEN_ORDER = ["Pesimista", "Base", "Optimista"]
 
 
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
-def cached_load(sym: str, allow_annual: bool):
-    return data_yahoo.load_company(sym, allow_annual)
+def cached_load(sym: str, allow_annual: bool, adr_ratio: float):
+    return data_yahoo.load_company(sym, allow_annual, adr_ratio or None)
 
 
 def pct(x, d=1):
@@ -47,6 +52,45 @@ def money(x, cur="", d=2):
     return "n/d" if x is None or x != x else f"{x:,.{d}f} {cur}".strip()
 
 
+def verdict(price, res):
+    """Frase simple: dónde está el precio respecto de los tres escenarios."""
+    vp, vb, vo = (res[n].per_share if res[n].ok else None for n in SCEN_ORDER)
+    if vp is not None and price < vp:
+        return "🟢 El precio está por **debajo incluso del escenario pesimista**: margen de seguridad amplio según el modelo."
+    if vb is not None and price < vb:
+        return "🟢 El precio está **entre el pesimista y el base**: cotiza con descuento frente al caso base."
+    if vo is not None and price < vo:
+        return "🟡 El precio está **entre el base y el optimista**: el mercado ya descuenta parte del escenario favorable."
+    if vo is not None:
+        return "🔴 El precio está **por encima del optimista**: el mercado paga más que el mejor escenario del modelo."
+    return "El precio supera al caso base y no hay escenario optimista disponible."
+
+
+def build_excel(co, res, base, sens, p, model, mos):
+    """Excel con resultados, supuestos, proyección base y sensibilidad (para guardar o comparar empresas)."""
+    buf = io.BytesIO()
+    resumen = pd.DataFrame([{"Escenario": n, "Valor por acción": res[n].per_share if res[n].ok else None,
+                             "vs precio": (res[n].per_share / co.price - 1) if res[n].ok else None,
+                             "Tasa de descuento": res[n].discount_rate if res[n].ok else None,
+                             "g terminal": res[n].g_terminal if res[n].ok else None} for n in SCEN_ORDER])
+    params = pd.DataFrame([
+        ("Ticker", co.ticker), ("Empresa", co.name), ("Sector", co.sector), ("Industria", co.industry),
+        ("Modelo", model), ("Precio", co.price), ("Moneda", co.currency), ("Cap. bursátil (M)", co.market_cap_m),
+        ("Tasa libre de riesgo", p.rf if p.rf is not None else co.rf), ("Prima de mercado", p.erp),
+        ("Prima de riesgo país", p.crp), ("Moat (spread sobre WACC)", p.moat_spread), ("g terminal", p.g_terminal),
+        ("Horizonte (años)", p.horizon), ("Margen de seguridad", mos),
+        ("Datos al", co.asof), ("Fuente TTM", co.ttm_source), ("Generado", datetime.now().strftime("%Y-%m-%d %H:%M")),
+    ], columns=["Parámetro", "Valor"])
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        resumen.to_excel(xw, sheet_name="Resumen", index=False)
+        params.to_excel(xw, sheet_name="Parametros", index=False)
+        pd.DataFrame(base.table).to_excel(xw, sheet_name="Proyeccion_Base", index=False)
+        if sens.get("ok"):
+            pd.DataFrame(sens["grid"], index=[f"{x:.2%}" for x in sens["rates"]],
+                         columns=[f"g {x:.2%}" for x in sens["gs"]]).to_excel(xw, sheet_name="Sensibilidad")
+    return buf.getvalue()
+
+
 # ----------------------------------------------------------------------------
 # Barra lateral: supuestos globales
 # ----------------------------------------------------------------------------
@@ -55,9 +99,12 @@ with st.sidebar:
     horizon = st.slider("Horizonte explícito (años)", 5, 15, 10)
     g_term = st.number_input("Crecimiento terminal g (%)", 0.0, 4.0, 2.5, 0.25) / 100
     erp = st.number_input("Prima de riesgo de mercado (%)", 3.0, 8.0, 4.5, 0.25) / 100
-    crp = st.number_input("Prima de riesgo país (%)", 0.0, 15.0, 0.0, 0.5,
-                          help="Se suma al costo del capital propio. Referencia: tabla de Damodaran "
-                               "(países desarrollados ≈ 0 %; emergentes, varios puntos).") / 100
+    crp_auto = st.checkbox("Prima de riesgo país automática", value=True,
+                           help="Según el país de la empresa, con la tabla de Damodaran (enero 2026). "
+                                "EE.UU., Europa desarrollada y Japón dan casi 0; emergentes suman varios puntos.")
+    crp_manual = 0.0
+    if not crp_auto:
+        crp_manual = st.number_input("Prima de riesgo país (%)", 0.0, 30.0, 0.0, 0.25) / 100
     moat = st.select_slider("Ventaja competitiva (moat)", list(MOAT_SPREADS), value="Estrecho",
                             help="Cuánto por encima del WACC puede seguir ganando la empresa sobre el capital "
                                  "que reinvierte, para siempre. Ninguno = 0 pp · Estrecho = +2 pp · Amplio = +5 pp. "
@@ -65,6 +112,9 @@ with st.sidebar:
     mos = st.slider("Margen de seguridad deseado (%)", 0, 50, 20) / 100
     allow_annual = st.checkbox("Permitir último año fiscal si no hay TTM", value=False,
                                help="Por defecto se exigen datos de los últimos 12 meses (TTM).")
+    adr_ratio = st.number_input("Acciones ordinarias por ADR (0 = automático)", 0.0, 1000.0, 0.0, 1.0,
+                                help="Solo para ADRs cuando Yahoo no informa la capitalización. "
+                                     "Ej.: TSM = 5, ASML y NVO = 1, BABA = 8.")
     with st.expander("Ajustes avanzados"):
         margin_mode = st.selectbox("Margen operativo objetivo", ["median", "ttm", "manual"],
                                    format_func={"median": "Mediana histórica (3-4 años + TTM)",
@@ -79,7 +129,6 @@ with st.sidebar:
             g1 = st.number_input("Crecimiento año 1 (%)", -20.0, 50.0, 8.0, 0.5) / 100
             g2 = st.number_input("Crecimiento año 2 (%)", -20.0, 50.0, 6.0, 0.5) / 100
             growth_override = (g1, g2)
-        rf_manual = st.number_input("Tasa libre de riesgo (%) — 0 = automática", 0.0, 15.0, 0.0, 0.05) / 100
         beta_manual = st.number_input("Beta — 0 = la de Yahoo", 0.0, 3.0, 0.0, 0.05)
         wacc_manual = st.number_input("WACC fijo (%) — 0 = calculado", 0.0, 20.0, 0.0, 0.25) / 100
         persistence = st.slider("Persistencia del exceso de ROE (financieras)", 0.0, 1.0, 0.5, 0.05,
@@ -94,11 +143,21 @@ st.caption("Ingresá un ticker de Yahoo Finance (ej.: AAPL, KO, JPM, O, TSM, SAP
            "Resultado: valor por acción en tres escenarios. Herramienta educativa, no es una recomendación.")
 
 with st.form("f"):
-    c1, c2 = st.columns([3, 2])
+    c1, c2, c3 = st.columns([3, 3, 2])
     ticker = c1.text_input("Ticker", value=st.session_state.get("last", "")).strip().upper()
+    rf_in = c3.number_input("Tasa libre de riesgo 10 años (%)", 0.0, 15.0, 0.0, 0.05,
+                            help="Opcional. Si la dejás en 0, la app la busca sola (Yahoo / Reserva Federal). "
+                                 "Si la cargás, se usa esta.")
     model_choice = c2.selectbox("Modelo", ["auto", "FCFF", "ER", "REIT"],
-                                format_func=lambda k: "Automático (según sector)" if k == "auto" else MODEL_LABELS[k])
+                                format_func=lambda k: "Automático (detecta el sector)" if k == "auto" else MODEL_LABELS[k],
+                                help="Dejalo en Automático: la app detecta el sector y elige el modelo. "
+                                     "Cambialo solo si el aviso te dice que no pudo detectarlo.")
     go = st.form_submit_button("Valuar", type="primary")
+
+st.caption("📌 Tasa libre de riesgo = rendimiento del bono del Tesoro de EE.UU. a 10 años. "
+           "Dónde mirarla hoy: [FRED – Reserva Federal (valor diario oficial)](https://fred.stlouisfed.org/series/DGS10) · "
+           "[CNBC – cotización en vivo](https://www.cnbc.com/quotes/US10Y). "
+           "Cargala arriba en % (ej.: 4,35) o dejá 0 para que la app la busque sola.")
 
 if go and ticker:
     st.session_state["last"] = ticker
@@ -112,18 +171,22 @@ if not sym:
 # ----------------------------------------------------------------------------
 try:
     with st.spinner(f"Descargando datos de {sym}…"):
-        co, load_warns = cached_load(sym, allow_annual)
+        co, load_warns = cached_load(sym, allow_annual, adr_ratio)
 except Exception as e:  # noqa: BLE001
     st.error(f"No pude cargar **{sym}**: {e}")
     st.stop()
 
+if crp_auto:
+    crp, crp_note = country_crp(co.country)
+else:
+    crp, crp_note = crp_manual, "Cargada a mano."
 auto_model, why = route_model(co)
 model = auto_model if model_choice == "auto" else model_choice
 
 p = Params(
     horizon=horizon, g_terminal=g_term, erp=erp, crp=crp, moat_spread=MOAT_SPREADS[moat],
     margin_mode=margin_mode, margin_manual=margin_manual, margin_years=margin_years,
-    growth_override=growth_override, rf=rf_manual or None, beta=beta_manual or None,
+    growth_override=growth_override, rf=(rf_in / 100) or None, beta=beta_manual or None,
     wacc_override=wacc_manual or None, persistence=persistence, affo_ratio=affo_ratio,
     affo_ps_override=affo_ps or None,
     include_leases={"auto": None, "sí": True, "no": False}[lease_opt],
@@ -131,7 +194,12 @@ p = Params(
 
 st.subheader(f"{co.name} ({co.ticker})")
 st.write(f"**Sector:** {co.sector or 'n/d'} · **Industria:** {co.industry or 'n/d'} · **País:** {co.country or 'n/d'} · "
-         f"**Precio:** {money(co.price, co.currency)} · **Cap. bursátil:** {money(co.market_cap_m, co.currency, 0)} M")
+         f"**Precio:** {money(co.price, co.currency)} · **Cap. bursátil:** {money(co.market_cap_m, co.currency, 0)} M · "
+         f"**Datos contables al:** {co.asof or 'n/d'}")
+_rf_used = p.rf if p.rf is not None else co.rf
+st.write(f"**Tasa libre de riesgo usada:** {_rf_used:.2%} "
+         f"({'cargada por vos' if p.rf is not None else 'automática'})")
+st.write(f"**Prima de riesgo país aplicada:** {crp:.2%} — {crp_note}")
 if model_choice == "auto":
     st.info(f"**Modelo: {MODEL_LABELS[model]}.** {why}")
 elif model != auto_model:
@@ -144,10 +212,8 @@ all_warns = list(dict.fromkeys(load_warns + data_checks(co)))
 if model == "FCFF" and (co.sector or "") in ("Energy", "Basic Materials"):
     all_warns.append("Sector cíclico: el margen EBIT está normalizado con la mediana histórica, pero revisá "
                      "si el ciclo actual es pico o piso.")
-if co.country and co.country.lower() in ("argentina", "brazil", "mexico", "turkey", "india", "china", "south africa",
-                                         "indonesia", "colombia", "chile", "peru", "egypt", "nigeria") and crp == 0:
-    all_warns.append(f"{co.country}: mercado emergente con prima de riesgo país en 0 %. "
-                     "Considerá cargarla en la barra lateral.")
+if crp_auto and (not co.country or "no figura" in crp_note):
+    all_warns.append(crp_note)
 
 if not base.ok:
     st.error(f"**No se puede valuar con este modelo:** {base.error}")
@@ -174,6 +240,13 @@ buy = base.per_share * (1 - mos)
 st.write(f"**Precio de compra con {mos:.0%} de margen de seguridad sobre el escenario Base:** "
          f"{money(buy, co.currency)}  ·  precio actual: {money(co.price, co.currency)} "
          f"({'por debajo ✅' if co.price <= buy else 'por encima'} de ese nivel)")
+
+st.markdown(verdict(co.price, res))
+sens = sensitivity(co, p, model)
+st.download_button("⬇️ Descargar resultado en Excel",
+                   build_excel(co, res, base, sens, p, model, mos),
+                   file_name=f"DCF_{co.ticker}_{datetime.now():%Y%m%d}.xlsx",
+                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 chart_df = pd.DataFrame({"Escenario": [n for n in SCEN_ORDER if res[n].ok],
                          "Valor": [res[n].per_share for n in SCEN_ORDER if res[n].ok]})
@@ -263,7 +336,7 @@ with t2:
     st.caption(f"Montos en millones de {co.currency}. Estados contables originales en {co.fin_currency}.")
 
 with t3:
-    s = sensitivity(co, p, model)
+    s = sens
     if s.get("ok"):
         idx = [f"{'WACC' if model == 'FCFF' else 'Ke'} {x:.2%}" for x in s["rates"]]
         colz = [f"g {x:.2%}" for x in s["gs"]]
